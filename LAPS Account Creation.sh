@@ -1,4 +1,5 @@
-#!/bin/sh
+#!/bin/bash
+
 ####################################################################################################
 #
 #   MIT License
@@ -23,33 +24,45 @@
 #   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 #   SOFTWARE.
 #
-####################################################################################################
-#
-# HISTORY
-#
-#	Version: 1.2
-#
-#	- 05/04/2016 Created by Phil Redfern
-#   - 05/06/2016 Updated by Phil Redfern, improved local logging and security update.
-#   - 05/16/2016 Updated by Phil Redfern, added logic for FileVault Encryption
-#
-#   - This script will create a local Administrator account to be used with LAPS.
-#
-####################################################################################################
-#
-# DEFINE VARIABLES & READ IN PARAMETERS
-#
-####################################################################################################
 
-# HARDCODED VALUES SET HERE
-apiUser=""
-apiPass=""
-LAPSuser=""
-LAPSuserDisplay=""
-newPass=""
-LAPSaccountEvent=""
-LAPSaccountEventFVE=""
-LAPSrunEvent=""
+function DecryptString() {
+	# Usage: ~$ DecryptString "Encrypted String" "Salt" "Passphrase"
+	echo "${1}" | /usr/bin/openssl enc -aes256 -d -a -A -S "${2}" -k "${3}"
+}
+
+apiUser=$(DecryptString "${4}" "Salt" "Passphrase")
+apiPass=$(DecryptString "${5}" "Salt" "Passphrase")
+LAPSuser="laps"
+LAPSuserDisplay="laps"
+LAPSaccountEvent="seedLapsUser"
+LAPSaccountEventFVE="_notused"
+LAPSrunEvent="runLapsMaintenance"
+
+unEncryptedPassword=$(openssl rand -base64 10 | tr -d OoIi1lLS | head -c12;echo)
+####################################################################
+#
+#            ┌─── openssl is used to create
+#            │	a random Base64 string
+#            │                    ┌── remove ambiguous characters
+#            │                    │
+# ┌──────────┴──────────┐	  ┌───┴────────┐
+# openssl rand -base64 10 | tr -d OoIi1lLS | head -c12;echo
+#                                            └──────┬─────┘
+#                                                   │
+#             prints the first 12 characters  ──────┘
+#             of the randomly generated string
+#
+
+SALT=$(openssl rand -hex 8)
+K=$(openssl rand -hex 12)
+
+encryptedPassword=$(echo "${unEncryptedPassword}" | openssl enc -aes256 -a -A -S "${SALT}" -k "${K}")
+echo "Password Encrypted with Salt: ${SALT} | Passphrase: ${K}"
+
+# Write the Salt and Passphrase out to the Cslient for subsequent password changes.
+
+defaults write /var/root/Library/Preferences/com.company.scramble.plist SALT  -string "${SALT}"
+defaults write /var/root/Library/Preferences/com.company.scramble.plist K  -string "${K}"
 
 # CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 4 AND, IF SO, ASSIGN TO "apiUser"
 if [ "$4" != "" ] && [ "$apiUser" == "" ];then
@@ -82,17 +95,17 @@ LAPSaccountEvent=$9
 fi
 
 # CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 10 AND, IF SO, ASSIGN TO "LAPSaccountEventFVE"
-if [ "${10}" != "" ] && [ "$LAPSaccountEventFVE" == "" ];then
-LAPSaccountEventFVE="${10}"
-fi
+# if [ "${10}" != "" ] && [ "$LAPSaccountEventFVE" == "" ];then
+# LAPSaccountEventFVE="${10}"
+# fi
 
 # CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 11 AND, IF SO, ASSIGN TO "LAPSrunEvent"
 if [ "${11}" != "" ] && [ "$LAPSrunEvent" == "" ];then
 LAPSrunEvent="${11}"
 fi
 
-apiURL="https://jss.unl.edu:8443"
-LogLocation="/Library/Logs/Casper_LAPS.log"
+apiURL="jamfProURL"
+LogLocation="/var/log/Jamf_LAPS.log"
 
 ####################################################################################################
 #
@@ -100,10 +113,10 @@ LogLocation="/Library/Logs/Casper_LAPS.log"
 #
 ####################################################################################################
 
-udid=$(/usr/sbin/system_profiler SPHardwareDataType | /usr/bin/awk '/Hardware UUID:/ { print $3 }')
-xmlString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><computer><extension_attributes><extension_attribute><name>LAPS</name><value>$newPass</value></extension_attribute></extension_attributes></computer>"
+udid=$(system_profiler SPHardwareDataType | /usr/bin/awk '/Hardware UUID:/ { print $3 }')
+xmlString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><computer><extension_attributes><extension_attribute><name>LAPS</name><value>"$encryptedPassword"</value></extension_attribute></extension_attributes></computer>"
 extAttName="\"LAPS\""
-FVEstatus=$(fdesetup status | grep -w "FileVault is" | awk '{print $3}' | sed 's/[.]//g')
+# FVEstatus=$(fdesetup status | grep -w "FileVault is" | awk '{print $3}' | sed 's/[.]//g')
 
 # Logging Function for reporting actions
 ScriptLogging(){
@@ -146,7 +159,7 @@ if [ "$LAPSuserDisplay" == "" ];then
     exit 1
 fi
 
-if [ "$newPass" == "" ];then
+if [ "$unEncryptedPassword" == "" ];then
     ScriptLogging "Error:  The parameter 'LAPS Password Seed' is blank.  Please specify a password to seed."
     echo "Error:  The parameter 'LAPS Password Seed' is blank.  Please specify a password to seed."
     ScriptLogging "======== Aborting LAPS Account Creation ========"
@@ -160,12 +173,6 @@ if [ "$LAPSaccountEvent" == "" ];then
     exit 1
 fi
 
-if [ "$LAPSaccountEventFVE" == "" ];then
-    ScriptLogging "Error:  The parameter 'LAPS Account Event FVE' is blank.  Please specify a Custom LAPS Account Event."
-    echo "Error:  The parameter 'LAPS Account Event FVE' is blank.  Please specify a Custom FVE LAPS Account Event."
-    ScriptLogging "======== Aborting LAPS Account Creation ========"
-    exit 1
-fi
 
 if [ "$LAPSrunEvent" == "" ];then
     ScriptLogging "Error:  The parameter 'LAPS Run Event' is blank.  Please specify a Custom LAPS Run Event."
@@ -194,13 +201,6 @@ CheckBinary (){
 # Identify location of jamf binary.
 jamf_binary=`/usr/bin/which jamf`
 
-if [[ "$jamf_binary" == "" ]] && [[ -e "/usr/sbin/jamf" ]] && [[ ! -e "/usr/local/bin/jamf" ]]; then
-jamf_binary="/usr/sbin/jamf"
-elif [[ "$jamf_binary" == "" ]] && [[ ! -e "/usr/sbin/jamf" ]] && [[ -e "/usr/local/bin/jamf" ]]; then
-jamf_binary="/usr/local/bin/jamf"
-elif [[ "$jamf_binary" == "" ]] && [[ -e "/usr/sbin/jamf" ]] && [[ -e "/usr/local/bin/jamf" ]]; then
-jamf_binary="/usr/local/bin/jamf"
-fi
 
 ScriptLogging "JAMF Binary is $jamf_binary"
 }
@@ -209,15 +209,15 @@ ScriptLogging "JAMF Binary is $jamf_binary"
 CreateLAPSaccount (){
     ScriptLogging "Creating LAPS Account..."
     echo "Creating LAPS Account..."
-    if [ "$FVEstatus" == "Off" ];then
-        $jamf_binary policy -event $LAPSaccountEvent
-        ScriptLogging "LAPS Account Created..."
+    $jamf_binary createAccount -username $LAPSuser -realname $LAPSuserDisplay -password "$unEncryptedPassword" -home /var/$LAPSuser -shell /bin/bash -admin -hiddenUser -suppressSetupAssistant
+    ScriptLogging "LAPS Account Created..."
         echo "LAPS Account Created..."
-    else
-        $jamf_binary policy -event $LAPSaccountEventFVE
-        ScriptLogging "LAPS Account Created with FVE..."
-        echo "LAPS Account Created with FVE..."
-    fi
+# The following isn't used if the Laps user will not be an FDE User
+#    else
+#        $jamf_binary policy -event $LAPSaccountEventFVE
+#        ScriptLogging "LAPS Account Created with FVE..."
+#        echo "LAPS Account Created with FVE..."
+#    fi
 }
 
 # Update the LAPS Extention Attribute
@@ -227,42 +227,44 @@ UpdateAPI (){
 }
 
 # Check to see if the account is authorized with FileVault 2
-FVEcheck (){
-    userCheck=`fdesetup list | awk -v usrN="$LAPSuserDisplay" -F, 'index($0, usrN) {print $1}'`
-        if [ "${userCheck}" == "${LAPSuserDisplay}" ]; then
-            ScriptLogging "$LAPSuserDisplay is enabled for FileVault 2."
-            echo "$LAPSuserDisplay is enabled for FileVault 2."
-        else
-            ScriptLogging "Error: $LAPSuserDisplay is not enabled for FileVault 2."
-            echo "Error: $LAPSuserDispaly is not enabled for FileVault 2."
-        fi
-}
+# FVEcheck (){
+#     userCheck=`fdesetup list | awk -v usrN="$LAPSuserDisplay" -F, 'index($0, usrN) {print $1}'`
+#         if [ "${userCheck}" == "${LAPSuserDisplay}" ]; then
+#             ScriptLogging "$LAPSuserDisplay is enabled for FileVault 2."
+#             echo "$LAPSuserDisplay is enabled for FileVault 2."
+#         else
+#             ScriptLogging "Error: $LAPSuserDisplay is not enabled for FileVault 2."
+#             echo "Error: $LAPSuserDispaly is not enabled for FileVault 2."
+#         fi
+# }
 
 # If FileVault Encryption is enabled, verify account.
-FVEverify (){
-    ScriptLogging "Checking FileVault Status..."
-    echo "Checking FileVault Status..."
-    if [ "$FVEstatus" == "On" ];then
-        ScriptLogging "FileVault is enabled, checking $LAPSuserDisplay..."
-        echo "FileVault is enabled, checking $LAPSuserDisplay..."
-        FVEcheck
-    else
-        ScriptLogging "FileVault is not enabled."
-        echo "FileVault is not enabled."
-    fi
-}
+# FVEverify (){
+#     ScriptLogging "Checking FileVault Status..."
+#     echo "Checking FileVault Status..."
+#     if [ "$FVEstatus" == "On" ];then
+#         ScriptLogging "FileVault is enabled, checking $LAPSuserDisplay..."
+#         echo "FileVault is enabled, checking $LAPSuserDisplay..."
+#         FVEcheck
+#     else
+#         ScriptLogging "FileVault is not enabled."
+#         echo "FileVault is not enabled."
+#     fi
+# }
 
 
 CheckBinary
 UpdateAPI
 CreateLAPSaccount
 UpdateAPI
-FVEverify
+# FVEverify
 
 ScriptLogging "======== LAPS Account Creation Complete ========"
 echo "LAPS Account Creation Finished."
 
 # Run LAPS Password Randomization
-$jamf_binary policy -event $LAPSrunEvent
+# $jamf_binary policy -event $LAPSrunEvent
 
 exit 0
+
+

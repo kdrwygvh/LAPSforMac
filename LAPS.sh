@@ -1,4 +1,7 @@
-#!/bin/sh
+#!/bin/bash
+
+set -x
+
 ####################################################################################################
 #
 #   MIT License
@@ -35,7 +38,7 @@
 #   - 05/06/2016 Updated by Phil Redfern, improved local logging and increased random passcode length.
 #   - 05/11/2016 Updated by Phil Redfern, removed ambiguous characters from the password generator.
 #
-#   - This script will randomize the password of the specified user account and post the password to the LAPS Extention Attribute in Casper.
+#   - This script will randomize the password of the specified user account and post the password to the LAPS Extention Attribute in Jamf.
 #
 ####################################################################################################
 #
@@ -43,30 +46,25 @@
 #
 ####################################################################################################
 
-# HARDCODED VALUES SET HERE
-apiUser=""
-apiPass=""
-resetUser=""
+function DecryptString() {
+	# Usage: ~$ DecryptString "Encrypted String" "Salt" "Passphrase"
+	echo "${1}" | /usr/bin/openssl enc -aes256 -d -a -A -S "${2}" -k "${3}"
+}
 
-# CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 4 AND, IF SO, ASSIGN TO "apiUser"
-if [ "$4" != "" ] && [ "$apiUser" == "" ];then
-apiUser=$4
-fi
+apiUser=$(DecryptString "${4}" "Salt" "Passphrase")
+apiPass=$(DecryptString "${5}" "Salt" "Passphrase")
+resetUser="laps"
 
-# CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 5 AND, IF SO, ASSIGN TO "apiPass"
-if [ "$5" != "" ] && [ "$apiPass" == "" ];then
-apiPass=$5
-fi
 
 # CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 6 AND, IF SO, ASSIGN TO "resetUser"
 if [ "$6" != "" ] && [ "$resetUser" == "" ];then
 resetUser=$6
 fi
 
-apiURL="https://jss.acme.com:8443"
-LogLocation="/Library/Logs/Casper_LAPS.log"
+apiURL="jpsURL"
+LogLocation="/var/log/Jamf_LAPS.log"
 
-newPass=$(openssl rand -base64 10 | tr -d OoIi1lLS | head -c12;echo)
+unEncryptedPassword=$(openssl rand -base64 10 | tr -d OoIi1lLS | head -c12;echo)
 ####################################################################
 #
 #            ┌─── openssl is used to create
@@ -80,17 +78,23 @@ newPass=$(openssl rand -base64 10 | tr -d OoIi1lLS | head -c12;echo)
 #             prints the first 12 characters  ──────┘
 #             of the randomly generated string
 #
+
+SALT="$(defaults read /var/root/Library/Preferences/com.company.scramble.plist SALT)"
+K="$(defaults read /var/root/Library/Preferences/com.company.scramble.plist K)"
+encryptedPassword=$(echo "${unEncryptedPassword}" | openssl enc -aes256 -a -A -S "${SALT}" -k "${K}")
+echo "Encrypted Password Created with Salt: ${SALT} | Passphrase: ${K}"
+
 ####################################################################################################
 #
 # SCRIPT CONTENTS - DO NOT MODIFY BELOW THIS LINE
 #
 ####################################################################################################
 
-udid=$(/usr/sbin/system_profiler SPHardwareDataType | /usr/bin/awk '/Hardware UUID:/ { print $3 }')
-xmlString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><computer><extension_attributes><extension_attribute><name>LAPS</name><value>$newPass</value></extension_attribute></extension_attributes></computer>"
+udid=$(system_profiler SPHardwareDataType | /usr/bin/awk '/Hardware UUID:/ { print $3 }')
+xmlString="<?xml version=\"1.0\" encoding=\"UTF-8\"?><computer><extension_attributes><extension_attribute><name>LAPS</name><value>"$encryptedPassword"</value></extension_attribute></extension_attributes></computer>"
 extAttName="\"LAPS\""
-oldPass=$(curl -s -f -u $apiUser:$apiPass -H "Accept: application/xml" $apiURL/JSSResource/computers/udid/$udid/subset/extension_attributes | xpath "//extension_attribute[name=$extAttName]" 2>&1 | awk -F'<value>|</value>' '{print $2}')
-
+oldPasswordEncrypted=$(curl -s -f -u $apiUser:$apiPass -H "Accept: application/xml" $apiURL/JSSResource/computers/udid/$udid/subset/extension_attributes | xpath "//extension_attribute[name=$extAttName]" 2>/dev/null | awk -F'<value>|</value>' '{print $2}')
+oldPasswordDecrypted=$(DecryptString "${oldPasswordEncrypted}" "${SALT}" "${K}")
 # Logging Function for reporting actions
 ScriptLogging(){
 
@@ -143,31 +147,24 @@ CheckBinary (){
 # Identify location of jamf binary.
 jamf_binary=`/usr/bin/which jamf`
 
-if [[ "$jamf_binary" == "" ]] && [[ -e "/usr/sbin/jamf" ]] && [[ ! -e "/usr/local/bin/jamf" ]]; then
-jamf_binary="/usr/sbin/jamf"
-elif [[ "$jamf_binary" == "" ]] && [[ ! -e "/usr/sbin/jamf" ]] && [[ -e "/usr/local/bin/jamf" ]]; then
-jamf_binary="/usr/local/bin/jamf"
-elif [[ "$jamf_binary" == "" ]] && [[ -e "/usr/sbin/jamf" ]] && [[ -e "/usr/local/bin/jamf" ]]; then
-jamf_binary="/usr/local/bin/jamf"
-fi
 
 ScriptLogging "JAMF Binary is $jamf_binary"
 }
 
-# Verify the current User Password in Casper LAPS
-CheckOldPassword (){
+# Verify the current User Password in Jamf LAPS
+CheckoldPassword (){
 ScriptLogging "Verifying password stored in LAPS."
 
-if [ "$oldPass" == "" ];then
+if [ "$oldPasswordEncrypted" == "" ];then
     ScriptLogging "No Password is stored in LAPS."
     echo "No Password is stored in LAPS."
-    oldPass=None
+    oldPassword=None
 else
     ScriptLogging "A Password was found in LAPS."
     echo "A Password was found in LAPS."
 fi
 
-passwdA=`dscl /Local/Default -authonly $resetUser $oldPass`
+passwdA=`dscl /Local/Default -authonly $resetUser $oldPasswordDecrypted`
 
 if [ "$passwdA" == "" ];then
     ScriptLogging "Password stored in LAPS is correct for $resetUser."
@@ -175,28 +172,28 @@ if [ "$passwdA" == "" ];then
 else
     ScriptLogging "Error: Password stored in LAPS is not valid for $resetUser."
     echo "Error: Password stored in LAPS is not valid for $resetUser."
-    oldPass=""
+    oldPassword=""
 fi
 }
 
 # Update the User Password
 RunLAPS (){
 ScriptLogging "Running LAPS..."
-if [ "$oldPass" == "" ];then
+if [ "$oldPasswordEncrypted" == "" ];then
     ScriptLogging "Current password not available, proceeding with forced update for $resetUser."
     echo "Current password not available, proceeding with forced update."
-    $jamf_binary resetPassword -username $resetUser -password $newPass
+    $jamf_binary resetPassword -username $resetUser -password $unEncryptedPassword
 else
     ScriptLogging "Updating password for $resetUser."
     echo "Updating password for $resetUser."
-    $jamf_binary resetPassword -updateLoginKeychain -username $resetUser -oldPassword $oldPass -password $newPass
+    $jamf_binary changePassword -username $resetUser -oldPassword $oldPasswordDecrypted -password $unEncryptedPassword
 fi
 }
 
 # Verify the new User Password
 CheckNewPassword (){
 ScriptLogging "Verifying new password for $resetUser."
-passwdB=`dscl /Local/Default -authonly $resetUser $newPass`
+passwdB=`dscl /Local/Default -authonly $resetUser $unEncryptedPassword`
 
 if [ "$passwdB" == "" ];then
     ScriptLogging "New password for $resetUser is verified."
@@ -216,10 +213,10 @@ ScriptLogging "Recording new password for $resetUser into LAPS."
 
 sleep 1
 
-LAPSpass=$(curl -s -f -u $apiUser:$apiPass -H "Accept: application/xml" $apiURL/JSSResource/computers/udid/$udid/subset/extension_attributes | xpath "//extension_attribute[name=$extAttName]" 2>&1 | awk -F'<value>|</value>' '{print $2}')
-
+lapsPasswordEncrypted=$(curl -s -f -u $apiUser:$apiPass -H "Accept: application/xml" $apiURL/JSSResource/computers/udid/$udid/subset/extension_attributes | xpath "//extension_attribute[name=$extAttName]" 2>/dev/null | awk -F'<value>|</value>' '{print $2}')
+lapsPasswordDecrypted=$(DecryptString "${lapsPasswordEncrypted}" "${SALT}" "${K}")
 ScriptLogging "Verifying LAPS password for $resetUser."
-passwdC=`dscl /Local/Default -authonly $resetUser $LAPSpass`
+passwdC=`dscl /Local/Default -authonly $resetUser $lapsPasswordDecrypted`
 if [ "$passwdC" == "" ];then
     ScriptLogging "LAPS password for $resetUser is verified."
     echo "LAPS password for $resetUser is verified."
@@ -232,7 +229,7 @@ fi
 }
 
 CheckBinary
-CheckOldPassword
+CheckoldPassword
 RunLAPS
 CheckNewPassword
 UpdateAPI
@@ -241,3 +238,5 @@ ScriptLogging "======== LAPS Update Finished ========"
 echo "LAPS Update Finished."
 
 exit 0
+
+
