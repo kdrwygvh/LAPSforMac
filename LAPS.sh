@@ -27,24 +27,6 @@ set -x
 #   SOFTWARE.
 #
 ####################################################################################################
-#
-# HISTORY
-#
-#	Version: 1.4
-#
-#	- 04/29/2016 Created by Phil Redfern
-#   - 05/01/2016 Updated by Phil Redfern, added upload verification and local Logging.
-#   - 05/02/2016 Updated by Phil Redfern and John Ross, added keychain update and fixed a bug where no stored LAPS password would cause the process to hang.
-#   - 05/06/2016 Updated by Phil Redfern, improved local logging and increased random passcode length.
-#   - 05/11/2016 Updated by Phil Redfern, removed ambiguous characters from the password generator.
-#
-#   - This script will randomize the password of the specified user account and post the password to the LAPS Extention Attribute in Jamf.
-#
-####################################################################################################
-#
-# DEFINE VARIABLES & READ IN PARAMETERS
-#
-####################################################################################################
 
 function DecryptString() {
 	# Usage: ~$ DecryptString "Encrypted String" "Salt" "Passphrase"
